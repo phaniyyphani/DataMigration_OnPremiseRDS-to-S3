@@ -1,0 +1,11 @@
+{
+    "land_bucket":"project2-targetlanding-parquet",
+	"database":"onpremise",
+	"table":"restaurant",
+	"raw_bucket":"project2-raw-parquet",
+	"usrname":"",
+	"password":"",
+	"host":"",
+	"meta_db":"mysql",
+	"meta_table":"ops_table"
+}
