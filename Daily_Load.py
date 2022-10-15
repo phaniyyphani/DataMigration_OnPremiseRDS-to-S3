@@ -2,6 +2,7 @@
 import boto3
 import json
 import argparse
+import traceback
 import pandas as pd
 
 from datetime import timedelta, date, datetime
@@ -25,13 +26,17 @@ def get_details_cdcfile_bydate(all_variables, check_date, timestamp):
     load_date_cdc_flag = False
     s3_files = []
     f_names = []
-    for result in results.get('Contents'):
-        f_timestamp = result.get('Key').split('/')[-1].split('.')[0].split('-')[1]
-        if timestamp < f_timestamp:
-            s3_files.append(f"s3://{all_variables.get('land_bucket')}/{result.get('Key')}")
-            f_names.append(result.get('Key').split('/')[-1].split('.')[0])
-            load_date_cdc_flag = True
-    log_message('info', 'get_details_cdcfile_bydate', f'return values load_date_cdc_flag, s3_files, max(f_names): {load_date_cdc_flag} , {s3_files}, {max(f_names)}')
+    if results.get('Contents') != None:
+        for result in results.get('Contents'):
+            f_timestamp = result.get('Key').split('/')[-1].split('.')[0].split('-')[1]
+            if timestamp < f_timestamp:
+                s3_files.append(f"s3://{all_variables.get('land_bucket')}/{result.get('Key')}")
+                f_names.append(result.get('Key').split('/')[-1].split('.')[0])
+                load_date_cdc_flag = True
+        log_message('info', 'get_details_cdcfile_bydate', f'return values load_date_cdc_flag, s3_files, max(f_names): {load_date_cdc_flag} , {s3_files}, {max(f_names)}')
+    else:
+        log_message('info', 'get_details_cdcfile_bydate', f'return values load_date_cdc_flag, s3_files, max(f_names): {load_date_cdc_flag} , {s3_files}, "Empty f_names Files"')
+
     return load_date_cdc_flag, s3_files, max(f_names)
 
 def get_cdc_gt_ge_loaddate(all_variables, load_date, e_flag):
@@ -138,6 +143,8 @@ if __name__ == '__main__':
     ##### Boto clients #####
     global s3 
     s3 = boto3.client('s3')
+    sm = boto3.client(service_name='secretsmanager',region_name='us-east-1')
+
 
     ##### Spark configuration #####
     spark = SparkSession.builder.enableHiveSupport()\
@@ -152,100 +159,128 @@ if __name__ == '__main__':
     content = response['Body']
     l2r_config = json.loads(content.read())
 
+    ##### Read SecretManager ####
+    try:
+        secret = sm.get_secret_value(SecretId='SourceDBCreds')
+        usr = json.loads(secret['SecretString'])['usrname']
+        password = json.loads(secret['SecretString'])['password']
+        hostname = json.loads(secret['SecretString'])['host']
+    except:
+        traceback.print_exc()
+        exit(1)
+
+    
     ##### Variable definitions #####
     all_variables = {}
     all_variables.update({'land_bucket' : l2r_config['land_bucket']}) 
     all_variables.update({'database' : f"{l2r_config['database']}"}) 
-    all_variables.update({'table' : f"{l2r_config['table']}"}) 
-    all_variables.update({'prefix' : f"{l2r_config['database']}/{l2r_config['table']}"}) 
     all_variables.update({'rawbucket' : l2r_config['raw_bucket']}) 
-    all_variables.update({'usrname' : l2r_config['usrname']}) 
-    all_variables.update({'password' : l2r_config['password']}) 
-    all_variables.update({'host' : l2r_config['host']}) 
+    all_variables.update({'usrname' : usr}) 
+    all_variables.update({'password' : password}) 
+    all_variables.update({'host' : hostname}) 
     all_variables.update({'meta_db' : l2r_config['meta_db']}) 
     all_variables.update({'meta_table' : l2r_config['meta_table']}) 
     
 
     ####### Meta data ########
-    
-    
-    last_processed_date, full_load_flag = get_lpf_ff(all_variables)
-    
+    any_exp = []
+    for table_index in range(len(l2r_config['table'])):
+        try:
+            all_variables.update({'table' : f"{l2r_config['table'][table_index]['t']}"}) 
+            all_variables.update({'prefix' : f"{l2r_config['database']}/{l2r_config['table'][table_index]['t']}"})
+            
+            ##
+            # force_full_load  is true
+            # delete record from meta for table-database combination
+            # delete s3 raw, raw current 
+            ##
 
-    if len(last_processed_date) == 0: 
-        log_message('info', 'main', f'last_processed_date length is 0')
-        load_file_str_date = get_load_file_date(all_variables)
-        
-        load_files = []
-        results = s3.list_objects_v2(Bucket = all_variables.get('land_bucket'), Prefix = all_variables.get('prefix')+f'/LOAD')
-        for result in results.get('Contents'):
-            load_files.append(f"s3://{all_variables.get('land_bucket')}/{result.get('Key')}")
+            last_processed_date, full_load_flag = get_lpf_ff(all_variables)
+            
+            if len(last_processed_date) == 0: 
+                log_message('info', 'main', f'last_processed_date length is 0')
+                load_file_str_date = get_load_file_date(all_variables)
+                
+                load_files = []
+                results = s3.list_objects_v2(Bucket = all_variables.get('land_bucket'), Prefix = all_variables.get('prefix')+f'/LOAD')
+                for result in results.get('Contents'):
+                    load_files.append(f"s3://{all_variables.get('land_bucket')}/{result.get('Key')}")
 
-        load_date_cdc_flag, cdc_files, max_cdc_filename = get_details_cdcfile_bydate(all_variables, load_file_str_date, '000000000') 
+                load_date_cdc_flag, cdc_files, max_cdc_filename = get_details_cdcfile_bydate(all_variables, load_file_str_date, '000000000') 
 
-        ## Initial day Load
-        if load_date_cdc_flag :
-            log_message('info', 'main', f'load_date_cdc_flag is: {load_date_cdc_flag}')
-            # Reading load files 
-            df_land_load = spark.read.parquet(*load_files)
-            df_land_load = df_land_load.withColumn('Op',lit('I'))
-            # Reading cdc files of the data as load file
-            df_land_loaddate_cdc = spark.read.parquet(*cdc_files)
-            # Union all files of load date and write to RAW layer
-            df_land_load_date = df_land_load.unionByName(df_land_loaddate_cdc)
-            df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-            log_message('info', 'main', f"overwritten initial day load file and same day cdc to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-            LPF = max_cdc_filename
+                ## Initial day Load
+                if load_date_cdc_flag :
+                    log_message('info', 'main', f'load_date_cdc_flag is: {load_date_cdc_flag}')
+                    # Reading load files 
+                    df_land_load = spark.read.parquet(*load_files)
+                    df_land_load = df_land_load.withColumn('Op',lit('I'))
+                    # Reading cdc files of the data as load file
+                    df_land_loaddate_cdc = spark.read.parquet(*cdc_files)
+                    # Union all files of load date and write to RAW layer
+                    df_land_load_date = df_land_load.unionByName(df_land_loaddate_cdc)
+                    df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"overwritten initial day load file and same day cdc to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    LPF = max_cdc_filename
 
-        else :
-            df_land_load_date = spark.read.parquet(*load_files)
-            df_land_load_date = df_land_load_date.withColumn('Op',lit('I'))
-            df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-            log_message('info', 'main', f"overwritten initial day load file to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-            LPF = load_file_str_date + '-000000000'
-        
-        ## CDC Day Load 
-        cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
-        if cdc_flag :
-            insert_metadata(all_variables, 'True', str(min(cdc_files_dates))+'-000000000')
-            cdc(all_variables)
-        else:
-            insert_metadata(all_variables, 'False', LPF)
-    
-    elif len(last_processed_date) > 0 and full_load_flag == 'True':
-        log_message('info', 'main', f'last_processed_date length is not 0 and full_load_flag is true')
-        cdc( all_variables)
-
-    elif len(last_processed_date) > 0 and full_load_flag == 'False':
-        log_message('info', 'main', f'last_processed_date length is not 0 and full_load_flag is false')
-        LPF = last_processed_date
-        unprocessd_load_date_cdc_flag, unprocessed_cdc_files, unprocessed_max_cdc_filename = get_details_cdcfile_bydate(all_variables, LPF.split('-')[0], LPF.split('-')[1])
-        if unprocessd_load_date_cdc_flag :
-            log_message('info', 'main', f'unprocessed files present, unprocessed_max_cdc_filename is {unprocessed_max_cdc_filename}')
-            load_file_str_date = LPF.split('-')[0]
-            # Reading unprocessed cdc files of the data as load file
-            df_land_loaddate_cdc = spark.read.parquet(*unprocessed_cdc_files)
-            df_land_loaddate_cdc.coalesce(1).write.mode('append').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-            log_message('info', 'main', f"appended unprocessed files to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-            LPF = unprocessed_max_cdc_filename
-            ## CDC Day Load 
-            cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
-            if cdc_flag :
-                update_metadata(all_variables, 'True', str(min(cdc_files_dates))+'-000000000' )
-                cdc(all_variables)
-            else:
-                update_metadata(all_variables, 'False', LPF )
-        else:
-            log_message('info', 'main', f'unprocessed files not present')
-            load_file_str_date = LPF.split('-')[0]
-            ## CDC Day Load 
-            cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
-            if cdc_flag :
-                update_metadata(all_variables, 'True', str(min(cdc_files_dates))+'-000000000')
+                else :
+                    df_land_load_date = spark.read.parquet(*load_files)
+                    df_land_load_date = df_land_load_date.withColumn('Op',lit('I'))
+                    df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"overwritten initial day load file to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    LPF = load_file_str_date + '-000000000'
+                
+                ## CDC Day Load 
+                cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
+                if cdc_flag :
+                    insert_metadata(all_variables, 'True', str(min(cdc_files_dates))+'-000000000')
+                    cdc(all_variables)
+                else:
+                    insert_metadata(all_variables, 'False', LPF)
+            
+            elif len(last_processed_date) > 0 and full_load_flag == 'True':
+                log_message('info', 'main', f'last_processed_date length is not 0 and full_load_flag is true')
                 cdc( all_variables)
-            else:
-                pass
 
+            elif len(last_processed_date) > 0 and full_load_flag == 'False':
+                log_message('info', 'main', f'last_processed_date length is not 0 and full_load_flag is false')
+                LPF = last_processed_date
+                unprocessd_load_date_cdc_flag, unprocessed_cdc_files, unprocessed_max_cdc_filename = get_details_cdcfile_bydate(all_variables, LPF.split('-')[0], LPF.split('-')[1])
+                if unprocessd_load_date_cdc_flag :
+                    log_message('info', 'main', f'unprocessed files present, unprocessed_max_cdc_filename is {unprocessed_max_cdc_filename}')
+                    load_file_str_date = LPF.split('-')[0]
+                    # Reading unprocessed cdc files of the data as load file
+                    df_land_loaddate_cdc = spark.read.parquet(*unprocessed_cdc_files)
+                    df_land_loaddate_cdc.coalesce(1).write.mode('append').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"appended unprocessed files to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    LPF = unprocessed_max_cdc_filename
+                    ## CDC Day Load 
+                    cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
+                    if cdc_flag :
+                        update_metadata(all_variables, 'True', str(min(cdc_files_dates))+'-000000000' )
+                        cdc(all_variables)
+                    else:
+                        update_metadata(all_variables, 'False', LPF )
+                else:
+                    log_message('info', 'main', f'unprocessed files not present')
+                    load_file_str_date = LPF.split('-')[0]
+                    ## CDC Day Load 
+                    cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
+                    if cdc_flag :
+                        update_metadata(all_variables, 'True', str(min(cdc_files_dates))+'-000000000')
+                        cdc( all_variables)
+                    else:
+                        pass
+        except :
+            any_exp.append(str(traceback.format_exc()))
+            continue
+
+    if len(any_exp) > 0:
+        for e in any_exp:
+            print(f"{e}")
+        exit(1)
+    else:
+        print('all tables loaded without any error')
+        exit(0)
 
 
         
