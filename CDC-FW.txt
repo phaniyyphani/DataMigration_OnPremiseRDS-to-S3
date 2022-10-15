@@ -62,3 +62,128 @@ OP, resturants, False, 20220926-000000000  --> No, 0
 -,-,-,-,-,-
 
 create table ops_table(Source VARCHAR(15),TableName VARCHAR(15), FullLoad VARCHAR(10), LPF VARCHAR(25));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+table
+pk,aduit col
+
+
+ID, C1, C2, C3, HT, HO
+1,x,c,y,jan1 12:00,Insert, 3
+1,,c,y,jan1 2:00,Update, 2
+1,,c,y,jan1 2:30, Delete, 1
+2,a,b,c,jan1 12:00,Insert, 2
+2,a,b1,c,jan1 2:00,Update, 1
+
+
+
+1,,c,y,jan1 2:30, Delete,1 
+2,a,b1,c,jan1 2:00,Update, 1
+
+
+
+2,a,b1,c,jan1 2:00,Update
+
+
+select t.* from ( select *, row_number() over (partition by {pk} order by header__timestamp desc) as r_id from table ) as t  where t.r_id =1 and t.header__operations != 'DELETEE'
+
+--------------------------------------------------------------------
+curated..bucket
+salesforce/account/<date>/...files
+====
+
+latest transcations LJ rsturatsn WHRE city = delhi
+
+
+df = spark.sl(select * from demo.transaction where partition_0 >= 'LPD' )
+df.crateTmpvow (t1) 
+df2 = selct ..... t .....
+df2.write.parqut(s3uri)
+
+df2 -----> (t2) 
+slect t2 LJ demo.rsturants r wher r.[partition_0 = 'yday'
+
+
+
+{
+	steps:[
+		{fun:"spark_sql",out:"df1",query:"select * from demo.transaction where partition_0 >= '{lpd}'"},
+		{fun:"crt_table",out:"t1",query:"df1"},
+		{fun:"spark_sql",out:"df2",query:"selct ..... t .....'"}
+		{fun:"wrt",out:"s3uro",query:"df2"}
+		
+	]
+
+}
+
+boto3
+hive
+pyspark
+python
+
+======
+
+terraform
+	MODULES
+	CLOUD
+	STATEFILE IN S3
+=======
+
+lambdas,
+APIGW
+GLUE
+ATHEENA
+DMS
+RDS
+
+REDSHIFT
+
+IAM
+KMS
+
+
+pyspark 
+
+for stp in steps:
+	stp['fun'] == "spark_sql":
+		lpd = get_from_mta()
+		eval(f"{stp['out']} = spark.sql(stp['query'])")
+	stp['fun'] == "crt_table":
+		eval(f"{stp['query']}.CretatTmpView({stp['out']})")
+	stp['fun'] == "wrt":
+		eval(f"{stp['query']}.write.parqut.({stp['out']})")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
