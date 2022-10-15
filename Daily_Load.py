@@ -1,9 +1,12 @@
+# spark-submit s3://project2-inputfiles/code/Daily_Load.py --env dev --config dev_config
+
 # CDC
 import boto3
 import json
 import argparse
 import traceback
 import pandas as pd
+import pymysql
 
 from datetime import timedelta, date, datetime
 from pyspark.sql import SparkSession
@@ -34,20 +37,27 @@ def get_details_cdcfile_bydate(all_variables, check_date, timestamp):
                 f_names.append(result.get('Key').split('/')[-1].split('.')[0])
                 load_date_cdc_flag = True
         log_message('info', 'get_details_cdcfile_bydate', f'return values load_date_cdc_flag, s3_files, max(f_names): {load_date_cdc_flag} , {s3_files}, {max(f_names)}')
+        return load_date_cdc_flag, s3_files, max(f_names)
+
     else:
         log_message('info', 'get_details_cdcfile_bydate', f'return values load_date_cdc_flag, s3_files, max(f_names): {load_date_cdc_flag} , {s3_files}, "Empty f_names Files"')
-
-    return load_date_cdc_flag, s3_files, max(f_names)
+        return load_date_cdc_flag, s3_files, ''
 
 def get_cdc_gt_ge_loaddate(all_variables, load_date, e_flag):
     log_message('info', 'get_cdc_gt_ge_loaddate', f'received values load_date and e_flag: {load_date} and {e_flag}')
     results = s3.list_objects_v2(Bucket = all_variables.get('land_bucket'), Prefix = all_variables.get('prefix')+f'/')
+    print("---------------finding out-------------------")
+    print(results)
+    print("---------------finding out-------------------")
+    print(results.get('Contents'))
+    print("---------------finding out-------------------")
     cdc_flag = False
     cdc_files_dates = []
     cdc_files_dt = []
     load_date = int(load_date)
     for result in results.get('Contents'):
-        if 'LOAD' not in result.get('Key').split('/')[-1].split('.')[0]:
+        if ('LOAD' not in result.get('Key').split('/')[-1].split('.')[0]) and ('.parquet' in result.get('Key').split('/')[-1]):
+            print(result.get('Key')) ## onpremise/restaurant2/
             f_date = int(result.get('Key').split('/')[-1].split('.')[0].split('-')[0])
             f_dt = result.get('Key').split('/')[-1].split('.')[0]
             if e_flag:
