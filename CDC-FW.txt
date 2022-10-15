@@ -1,0 +1,64 @@
+FullLoad()
+check metadata if there is any record for Source/Table combination
+ -------> NO Record
+	Read Load file --> H_TS --> find date.
+	Check if that date has any more cdc files
+		. Yes --> Read them --> Union DFs --> Over-Write to that date in RAW S3
+			LPF ==> max_filename 
+		. No --> Write DF -->  Over-Write to that date in RAW S3
+			LPF ==> 26-0000000
+	Check if any cdc with filenam > that dat is prsent 
+		. Ys -==> 1
+			MIN CDC file but > that dat ==> MinFDcdc
+			insrt MetaDATA --> T ; MinFDcdc-00000
+			CDC()
+		. No ===> 0
+			insrt MetaDATA --> F 
+	
+
+--------> Record Present with Full Load False
+	that date = Metadata.LPF.Date
+	Check if that date has any more cdc files
+		. Yes --> Read them --> Union DFs --> Over-Write to that date in RAW S3
+			LPF ==> max_filename 
+		. No --> Write DF -->  Over-Write to that date in RAW S3
+			LPF ==> 0000000
+	Check if any cdc with filenam > that dat is prsent 
+		. Ys -==> 1
+			Update MetaDATA
+			CDC()
+		. No ===> 0
+			Update MetaDATA
+
+--------> Record Present with Full Load True
+	CDC()
+
+
+CDC() 
+	LPF ==> Metadata.LPF
+	MFD ==> In S3 cdc, find maxium file date
+	if LPF == MFD : 
+		do-nothing 
+	else
+		if LPF.date == MFD.date
+			read all cdc files with LPF.date and Over-Write RAW S3
+			Updat MetaData MFD 
+		else LPF.date < MFD.date
+			dates_list = get all calander dates including LPF.date and MFD.date in asec
+			For date in dates_list:
+				read all cdc files with LPF.date and Over-Write RAW S3 
+			Update MetaDate MFD 
+		else LPF.date >  MFD.date
+			Raise Exception>> Exit Code .
+	
+
+
+Metadata: 
+Source, TableName, Full Load, LPF 
+OP, resturants, True, 20220927-135523276   ---> Yes, 1
+OP, resturants, True, 20220927-000000000 ---> No, 1
+OP, resturants, False, 20220926-135523276  --> Yes, 0 
+OP, resturants, False, 20220926-000000000  --> No, 0 
+-,-,-,-,-,-
+
+create table ops_table(Source VARCHAR(15),TableName VARCHAR(15), FullLoad VARCHAR(10), LPF VARCHAR(25));
