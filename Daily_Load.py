@@ -1,4 +1,14 @@
-# spark-submit s3://project2-inputfiles/code/Daily_Load.py --env dev --config dev_config
+# spark-submit s3://project2-inputfiles/code/Daily_Load.py --env dev --config dev_config > logfile.txt
+# pip3 install boto3
+# pip3 install json
+# pip3 install argparse
+# pip3 install traceback
+# pip3 install pandas
+# pip3 install pymysql
+# pip3 install datetime
+# pip3 install sqlalchemy
+# pip3 install pyspark
+
 
 # CDC
 import boto3
@@ -46,18 +56,13 @@ def get_details_cdcfile_bydate(all_variables, check_date, timestamp):
 def get_cdc_gt_ge_loaddate(all_variables, load_date, e_flag):
     log_message('info', 'get_cdc_gt_ge_loaddate', f'received values load_date and e_flag: {load_date} and {e_flag}')
     results = s3.list_objects_v2(Bucket = all_variables.get('land_bucket'), Prefix = all_variables.get('prefix')+f'/')
-    print("---------------finding out-------------------")
-    print(results)
-    print("---------------finding out-------------------")
-    print(results.get('Contents'))
-    print("---------------finding out-------------------")
+    
     cdc_flag = False
     cdc_files_dates = []
     cdc_files_dt = []
     load_date = int(load_date)
     for result in results.get('Contents'):
         if ('LOAD' not in result.get('Key').split('/')[-1].split('.')[0]) and ('.parquet' in result.get('Key').split('/')[-1]):
-            print(result.get('Key')) ## onpremise/restaurant2/
             f_date = int(result.get('Key').split('/')[-1].split('.')[0].split('-')[0])
             f_dt = result.get('Key').split('/')[-1].split('.')[0]
             if e_flag:
@@ -87,7 +92,6 @@ def update_metadata(all_variables, FullLoad, LPF ):
     log_message('info', 'update_metadata', f"executed following query\n: UPDATE {all_variables.get('meta_table')} SET LPF = '{LPF}', FullLoad = '{FullLoad}' where Source = '{all_variables.get('database')}' and TableName = '{all_variables.get('table')}'; ")
     meta_conn.close()
     
-
 def cal_dates_inclusive(s_date, e_date):
     log_message('info', 'cal_dates_inclusive', f'received values s_date, e_date: {s_date} and {e_date}')
     tmp = date(int(s_date[0:4]),int(s_date[4:6]),int(s_date[6:8]))
@@ -97,6 +101,11 @@ def cal_dates_inclusive(s_date, e_date):
         cal_dates.append(tmp.strftime('%Y%m%d'))
     log_message('info', 'cal_dates_inclusive', f'return values cal_dates: {cal_dates}')
     return cal_dates
+
+def get_prev_caldate(str_date):
+    d = date(int(str_date[0:4]),int(str_date[4:6]),int(str_date[6:8]))
+    d_prev = (d - timedelta(days=1))
+    return d_prev.strftime('%Y%m%d')
 
 def cdc(all_variables):
     log_message('info', 'cdc', f'started cdc processing')
@@ -110,15 +119,60 @@ def cdc(all_variables):
         else:
             if LPF.split('-')[0] == MF.split('-')[0]:
                 log_message('info', 'cdc', f'LPF.date is equal to MF.date')
+
+                # RAW
                 df_cdc = spark.read.parquet(f"s3://{all_variables.get('land_bucket')}/{all_variables.get('prefix')}/{LPF.split('-')[0]}-*")
                 df_cdc.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{LPF.split('-')[0]}/")
+                # RAW CURRENT
+                found_prev_rc = False
+                the_date = LPF.split('-')[0]
+                while not found_prev_rc:
+                    prev_date = get_prev_caldate(the_date)
+                    results = s3.list_objects_v2(Bucket = all_variables.get('rawcurrentbucket'), Prefix = all_variables.get('prefix')+f'/{prev_date}'+'/')
+                    if results.get('Contents') != None:
+                        for result in results.get('Contents'):
+                            if '.parquet' in result.get('Key'):
+                                found_prev_rc = True
+                                break
+                    the_date = prev_date
+                            
+                df_prev_rc = spark.read.parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{prev_date}/*")
+
+                df = df_prev_rc.unionByName(df_cdc)
+                df.createOrReplaceTempView('table')
+                df_rc = get_latest_nodups(all_variables.get('pk'))
+                df_rc.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{LPF.split('-')[0]}/")
+
                 update_metadata(all_variables, 'True', MF)
             elif LPF.split('-')[0] < MF.split('-')[0]:
                 log_message('info', 'cdc', f'LPF.date < MF.date')
                 cal_dates = cal_dates_inclusive(LPF.split('-')[0], MF.split('-')[0])
                 for date in cal_dates:
+
+                    # RAW
                     df_cdc = spark.read.parquet(f"s3://{all_variables.get('land_bucket')}/{all_variables.get('prefix')}/{date}-*")
                     df_cdc.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{date}/")
+                    
+                    # RAW CURRENT
+                    found_prev_rc = False
+                    the_date = date
+                    while not found_prev_rc:
+                        prev_date = get_prev_caldate(the_date)
+                        results = s3.list_objects_v2(Bucket = all_variables.get('rawcurrentbucket'), Prefix = all_variables.get('prefix')+f'/{prev_date}'+'/')
+                        if results.get('Contents') != None:
+                            for result in results.get('Contents'):
+                                if '.parquet' in result.get('Key'):
+                                    found_prev_rc = True
+                                    break
+                        the_date = prev_date
+                                
+                    df_prev_rc = spark.read.parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{prev_date}/*")
+
+                    df = df_prev_rc.unionByName(df_cdc)
+                    df.createOrReplaceTempView('table')
+                    df_rc = get_latest_nodups(all_variables.get('pk'))
+                    df_rc.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{date}/")
+
                 update_metadata(all_variables, 'True', MF)
             else:
                 log_message('error', 'cdc', f'CODE ISSUE - ERROR')
@@ -140,15 +194,24 @@ def get_lpf_ff(all_variables):
     log_message('info', 'get_lpf_ff', f'return values last_processed_date, full_load_flag are: {last_processed_date} , {full_load_flag} ')
     return last_processed_date, full_load_flag
 
+def get_latest_nodups(pk):
+    df = spark.sql(f"select t.* from ( select *, row_number() over (partition by {pk} order by header__timestamp desc) as r_id from table ) as t  where t.r_id =1 and t.header__operation != 'DELETE'")
+    return df.drop(df.r_id)
+
 if __name__ == '__main__':
 
     ##### Argument check and read #####
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', required=True)
     parser.add_argument('--config', required=True)
+    parser.add_argument('--forceLoad', required=False)
     args = parser.parse_args()
     env = args.env
     config_file_name = args.config
+    if args.forceLoad == None or args.forceLoad.lower() == 'false':
+        force_load = False
+    else:
+        force_load = args.forceLoad
 
     ##### Boto clients #####
     global s3 
@@ -185,6 +248,7 @@ if __name__ == '__main__':
     all_variables.update({'land_bucket' : l2r_config['land_bucket']}) 
     all_variables.update({'database' : f"{l2r_config['database']}"}) 
     all_variables.update({'rawbucket' : l2r_config['raw_bucket']}) 
+    all_variables.update({'rawcurrentbucket' : l2r_config['rawcurrent_bucket']})
     all_variables.update({'usrname' : usr}) 
     all_variables.update({'password' : password}) 
     all_variables.update({'host' : hostname}) 
@@ -196,7 +260,9 @@ if __name__ == '__main__':
     any_exp = []
     for table_index in range(len(l2r_config['table'])):
         try:
+            log_message('info', 'main', f"started processing {l2r_config['table'][table_index]['t']}")
             all_variables.update({'table' : f"{l2r_config['table'][table_index]['t']}"}) 
+            all_variables.update({'pk' : f"{l2r_config['table'][table_index]['pk']}"}) 
             all_variables.update({'prefix' : f"{l2r_config['database']}/{l2r_config['table'][table_index]['t']}"})
             
             ##
@@ -205,8 +271,22 @@ if __name__ == '__main__':
             # delete s3 raw, raw current 
             ##
 
+            if force_load:
+                meta_conn_str = f"mysql+pymysql://{all_variables.get('usrname')}:{all_variables.get('password')}@{all_variables.get('host')}/{all_variables.get('meta_db')}"
+                meta_conn = create_engine(meta_conn_str).connect()
+                meta_conn.execute(f"delete from {all_variables.get('meta_table')} where `Source` = '{all_variables.get('database')}' and `TableName` = '{all_variables.get('table')}' ;")
+                log_message('info', 'Delete Metadata', f"executed following query\n: delete from {all_variables.get('meta_table')} where `Source` = '{all_variables.get('database')}' and `TableName` = '{all_variables.get('table')}' ;")
+                meta_conn.close()
+
+                s3_resource = boto3.resource('s3')
+                bucket = s3_resource.Bucket(all_variables.get('rawbucket'))
+                bucket.objects.filter(Prefix=all_variables.get('prefix')+'/').delete()
+                bucket = s3_resource.Bucket(all_variables.get('rawcurrentbucket'))
+                bucket.objects.filter(Prefix=all_variables.get('prefix')+'/').delete()
+                log_message('info', 'ForceLoad', "delete s3 RAW, RAW Current as part of ForceLoad")
+
             last_processed_date, full_load_flag = get_lpf_ff(all_variables)
-            
+
             if len(last_processed_date) == 0: 
                 log_message('info', 'main', f'last_processed_date length is 0')
                 load_file_str_date = get_load_file_date(all_variables)
@@ -226,17 +306,30 @@ if __name__ == '__main__':
                     df_land_load = df_land_load.withColumn('Op',lit('I'))
                     # Reading cdc files of the data as load file
                     df_land_loaddate_cdc = spark.read.parquet(*cdc_files)
-                    # Union all files of load date and write to RAW layer
+                    # unionByName all files of load date and write to RAW layer
                     df_land_load_date = df_land_load.unionByName(df_land_loaddate_cdc)
+
+                    # RAW
                     df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-                    log_message('info', 'main', f"overwritten initial day load file and same day cdc to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"RAW: overwritten initial day load file and same day cdc to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    # RAW CURRENT
+                    df_land_load_date.createOrReplaceTempView('table')
+                    df_rc = get_latest_nodups(all_variables.get('pk'))
+                    df_rc.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"RAW CURRNT: overwritten initial day load file and same day cdc to \ns3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
                     LPF = max_cdc_filename
 
                 else :
                     df_land_load_date = spark.read.parquet(*load_files)
                     df_land_load_date = df_land_load_date.withColumn('Op',lit('I'))
+
+                    # RAW
                     df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
-                    log_message('info', 'main', f"overwritten initial day load file to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"RAW: overwritten initial day load file to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    # RAW CURRENT
+                    df_land_load_date.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"RAW CURRENT: overwritten initial day load file to \ns3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+
                     LPF = load_file_str_date + '-000000000'
                 
                 ## CDC Day Load 
@@ -259,9 +352,19 @@ if __name__ == '__main__':
                     log_message('info', 'main', f'unprocessed files present, unprocessed_max_cdc_filename is {unprocessed_max_cdc_filename}')
                     load_file_str_date = LPF.split('-')[0]
                     # Reading unprocessed cdc files of the data as load file
+
+                    # RAW
                     df_land_loaddate_cdc = spark.read.parquet(*unprocessed_cdc_files)
                     df_land_loaddate_cdc.coalesce(1).write.mode('append').parquet(f"s3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
                     log_message('info', 'main', f"appended unprocessed files to \ns3://{all_variables.get('rawbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    # RAW CURRENT
+                    df_existing_rc = spark.read.parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    df = df_existing_rc.unionByName(df_land_loaddate_cdc)
+                    df.createOrReplaceTempView('table')
+                    df_rc = get_latest_nodups(all_variables.get('pk'))
+                    df_rc.coalesce(1).write.mode('overwrite').parquet(f"s3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+                    log_message('info', 'main', f"overwriten rc files to \ns3://{all_variables.get('rawcurrentbucket')}/{all_variables.get('prefix')}/{load_file_str_date}/")
+
                     LPF = unprocessed_max_cdc_filename
                     ## CDC Day Load 
                     cdc_flag, cdc_files_dates, _ = get_cdc_gt_ge_loaddate(all_variables, load_file_str_date, False)
@@ -280,7 +383,9 @@ if __name__ == '__main__':
                         cdc( all_variables)
                     else:
                         pass
+        
         except :
+            print('---------------- found exception---------------------------')
             any_exp.append(str(traceback.format_exc()))
             continue
 
